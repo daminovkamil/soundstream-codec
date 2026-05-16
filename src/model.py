@@ -1,4 +1,5 @@
 import typing as tp
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -378,7 +379,9 @@ class ResidualVectorQuantizer(nn.Module):
 
         for quantizer in self.quantizers:
             quantized, quantizer_indices = quantizer(residual)
-            commitment_loss = commitment_loss + (residual - quantized.detach()).pow(2).mean()
+            commitment_loss = (
+                commitment_loss + (residual - quantized.detach()).pow(2).mean()
+            )
             collected = collected + quantized
             residual = residual - quantized.detach()
             indices.append(quantizer_indices)
@@ -386,6 +389,42 @@ class ResidualVectorQuantizer(nn.Module):
         commitment_loss = commitment_loss / len(self.quantizers)
         quantized_st = x + (collected - x).detach()
         return quantized_st, torch.stack(indices, dim=1), commitment_loss
+
+    def quantize(self, x: torch.FloatTensor) -> torch.LongTensor:
+        """
+        Args:
+            x: [B, D, T] encoder output.
+
+        Returns:
+            [B, N_q, T] codebook indices per quantizer.
+        """
+        residual = x
+        indices = []
+        for quantizer in self.quantizers:
+            quantized, quantizer_indices = quantizer(residual)
+            indices.append(quantizer_indices)
+            residual = residual - quantized.detach()
+        return torch.stack(indices, dim=1)
+
+    def unquantize(self, indices: torch.LongTensor) -> torch.FloatTensor:
+        """
+        Args:
+            indices: [B, N_q, T] codebook indices per quantizer.
+
+        Returns:
+            [B, D, T] summed quantized latent.
+        """
+        collected = torch.zeros(
+            indices.size(0),
+            self.quantizers[0].dim,
+            indices.size(-1),
+            device=indices.device,
+            dtype=self.quantizers[0].codebook.dtype,
+        )
+        for i, quantizer in enumerate(self.quantizers):
+            quantized = F.embedding(indices[:, i], quantizer.codebook)
+            collected = collected + quantized.transpose(-1, -2).contiguous()
+        return collected
 
 
 class SoundStream(nn.Module):
@@ -404,9 +443,80 @@ class SoundStream(nn.Module):
             num_quantizers, codebook_size, embedding_dim
         )
 
+    @classmethod
+    def from_pretrained(
+        cls,
+        checkpoint_path: str | Path,
+        channels: int,
+        embedding_dim: int,
+        num_quantizers: int,
+        codebook_size: int,
+        strides: tp.List[int],
+        map_location: str | torch.device = "cpu",
+    ) -> "SoundStream":
+        """Load codec weights from a PyTorch Lightning checkpoint."""
+        ckpt = torch.load(
+            checkpoint_path, map_location=map_location, weights_only=False
+        )
+        model = cls(channels, embedding_dim, num_quantizers, codebook_size, strides)
+        state = {
+            k.removeprefix("codec."): v
+            for k, v in ckpt["state_dict"].items()
+            if k.startswith("codec.")
+        }
+        model.load_state_dict(state, strict=True)
+        model.eval()
+        return model
+
+    def encode(self, waveform: torch.FloatTensor) -> torch.FloatTensor:
+        """
+        Args:
+            waveform: [B, 1, T] raw audio.
+
+        Returns:
+            [B, D, T_latent] continuous encoder latent.
+        """
+        return self.encoder(waveform)
+
+    def quantize(self, encoded: torch.FloatTensor) -> torch.LongTensor:
+        """
+        Args:
+            encoded: [B, D, T_latent] encoder output.
+
+        Returns:
+            [B, N_q, T_latent] discrete codes.
+        """
+        return self.quantizer.quantize(encoded)
+
+    def unquantize(self, indices: torch.LongTensor) -> torch.FloatTensor:
+        """
+        Args:
+            indices: [B, N_q, T_latent] discrete codes.
+
+        Returns:
+            [B, D, T_latent] quantized latent for the decoder.
+        """
+        return self.quantizer.unquantize(indices)
+
+    def decode(
+        self, quantized: torch.FloatTensor, length: int | None = None
+    ) -> torch.FloatTensor:
+        """
+        Args:
+            quantized: [B, D, T_latent] quantized latent.
+            length: optional waveform length to crop the output to.
+
+        Returns:
+            [B, 1, T] reconstructed audio.
+        """
+        reconstructed = self.decoder(quantized)
+        if length is not None:
+            reconstructed = reconstructed[..., :length]
+        return reconstructed
+
     def forward(self, waveform: torch.FloatTensor):
         length = waveform.size(-1)
-        encoded = self.encoder(waveform)
+        encoded = self.encode(waveform)
         quantized, indices, commitment_loss = self.quantizer(encoded)
-        reconstructed = self.decoder(quantized)[..., :length]
+        reconstructed = self.decode(quantized, length)
         return reconstructed, indices, commitment_loss
