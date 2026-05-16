@@ -2,6 +2,25 @@
 
 PyTorch implementation of [SoundStream](https://arxiv.org/abs/2107.03312), trained on LibriSpeech at 16 kHz using [PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/).
 
+Pretrained checkpoint: [daminovkamil/soundstream-codec](https://huggingface.co/daminovkamil/soundstream-codec) on Hugging Face.
+
+## Training details
+
+The Hugging Face checkpoint `best-40000-161.865.ckpt` is trained on LibriSpeech `train-clean-100` at 16 kHz and evaluated on `test-clean`.
+
+Main training settings:
+
+- `batch_size=64`
+- `crop_length=8000`
+- `lr=2e-4`
+- `channels=32`
+- `embedding_dim=128`
+- `num_quantizers=8`
+- `codebook_size=1024`
+- `strides=[2, 4, 5, 5]`
+
+**Not in the paper:** we add commitment loss (MSE between each RVQ residual and its quantized detached version, weight 1.0) so encoder outputs stay aligned with the codebook.
+
 ## Usage
 
 Clone the repo, install dependencies, and set your Comet API key. Training logs to the `soundstream-codec` Comet project.
@@ -23,6 +42,8 @@ python train.py --resume checkpoints/your.ckpt --batch-size 16 --max-steps 20000
 ```
 
 ## Inference
+
+See [demo.ipynb](demo.ipynb) for a runnable inference example.
 
 Load the codec from a Lightning checkpoint (architecture must match training — see constants in `train.py`):
 

@@ -426,7 +426,6 @@ class ResidualVectorQuantizer(nn.Module):
             collected = collected + quantized.transpose(-1, -2).contiguous()
         return collected
 
-
 class SoundStream(nn.Module):
     def __init__(
         self,
