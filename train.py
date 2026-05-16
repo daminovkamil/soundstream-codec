@@ -5,7 +5,6 @@ import torch
 from pystoi import stoi
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import CometLogger
-from torch import nn
 from torch.utils.data import DataLoader, random_split
 from torchmetrics.audio import NonIntrusiveSpeechQualityAssessment
 
@@ -17,33 +16,18 @@ from src.losses import (
     GeneratorAdversarialLoss,
     ReconstructionLoss,
 )
-from src.model import Decoder, Encoder, ResidualVectorQuantizer
+from src.model import SoundStream
 
 SAMPLE_RATE = 16_000
 STRIDES = [2, 4, 5, 5]
-
-
-class SoundStream(nn.Module):
-    def __init__(
-        self, channels=32, embedding_dim=128, num_quantizers=8, codebook_size=1024
-    ):
-        super().__init__()
-        self.encoder = Encoder(channels, embedding_dim, STRIDES)
-        self.decoder = Decoder(embedding_dim, channels, STRIDES)
-        self.quantizer = ResidualVectorQuantizer(
-            num_quantizers, codebook_size, embedding_dim
-        )
-
-    def forward(self, waveform):
-        length = waveform.size(-1)
-        encoded = self.encoder(waveform)
-        quantized, indices, commitment_loss = self.quantizer(encoded)
-        reconstructed = self.decoder(quantized)[..., :length]
-        return reconstructed, indices, commitment_loss
+CHANNELS = 32
+EMBEDDING_DIM = 128
+NUM_QUANTIZERS = 8
+CODEBOOK_SIZE = 1024
 
 
 class LibriSpeechDataModule(pl.LightningDataModule):
-    def __init__(self, data_dir, batch_size=32, num_workers=8, crop_length=SAMPLE_RATE // 2):
+    def __init__(self, data_dir, batch_size, num_workers, crop_length):
         super().__init__()
         self.data_dir = data_dir
         self.batch_size = batch_size
@@ -94,17 +78,20 @@ class LibriSpeechDataModule(pl.LightningDataModule):
 class SoundStreamTrainer(pl.LightningModule):
     def __init__(
         self,
-        lr=2e-4,
-        channels=32,
-        embedding_dim=128,
-        num_quantizers=8,
-        codebook_size=1024,
+        lr,
+        channels,
+        embedding_dim,
+        num_quantizers,
+        codebook_size,
+        strides,
     ):
         super().__init__()
         self.save_hyperparameters()
         self.automatic_optimization = False
 
-        self.codec = SoundStream(channels, embedding_dim, num_quantizers, codebook_size)
+        self.codec = SoundStream(
+            channels, embedding_dim, num_quantizers, codebook_size, strides
+        )
         self.discriminator = SoundStreamDisciminator(
             win_length=1024, hop_length=256, n_channels=32
         )
@@ -289,9 +276,19 @@ def main():
     torch.set_float32_matmul_precision("medium")
 
     datamodule = LibriSpeechDataModule(
-        args.data_dir, args.batch_size, args.num_workers, crop_length=args.crop_length
+        args.data_dir,
+        args.batch_size,
+        args.num_workers,
+        args.crop_length,
     )
-    model = SoundStreamTrainer(lr=args.lr)
+    model = SoundStreamTrainer(
+        args.lr,
+        CHANNELS,
+        EMBEDDING_DIM,
+        NUM_QUANTIZERS,
+        CODEBOOK_SIZE,
+        STRIDES,
+    )
 
     checkpoint = ModelCheckpoint(
         dirpath=args.ckpt_dir,
@@ -303,7 +300,7 @@ def main():
     )
 
     trainer = pl.Trainer(
-        max_steps=args.max_steps,
+        max_steps=args.max_steps * 2,
         accelerator="auto",
         devices=1,
         logger=CometLogger(project_name="soundstream-codec"),

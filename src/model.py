@@ -386,3 +386,27 @@ class ResidualVectorQuantizer(nn.Module):
         commitment_loss = commitment_loss / len(self.quantizers)
         quantized_st = x + (collected - x).detach()
         return quantized_st, torch.stack(indices, dim=1), commitment_loss
+
+
+class SoundStream(nn.Module):
+    def __init__(
+        self,
+        channels: int,
+        embedding_dim: int,
+        num_quantizers: int,
+        codebook_size: int,
+        strides: tp.List[int],
+    ):
+        super().__init__()
+        self.encoder = Encoder(channels, embedding_dim, strides)
+        self.decoder = Decoder(embedding_dim, channels, strides)
+        self.quantizer = ResidualVectorQuantizer(
+            num_quantizers, codebook_size, embedding_dim
+        )
+
+    def forward(self, waveform: torch.FloatTensor):
+        length = waveform.size(-1)
+        encoded = self.encoder(waveform)
+        quantized, indices, commitment_loss = self.quantizer(encoded)
+        reconstructed = self.decoder(quantized)[..., :length]
+        return reconstructed, indices, commitment_loss
